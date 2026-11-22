@@ -145,20 +145,46 @@ async function swapAllToXlm(kp, slippagePct = 2.0) {
   return total;
 }
 
+
 async function removeAllTrustlines(kp) {
-  const balances = await getBalances(kp.publicKey());
-  for (const bal of balances) {
-    if (bal.asset_type === "native") continue;
-    const code = bal.asset_code;
-    const issuer = bal.asset_issuer;
-    const saldo = parseFloat(bal.balance);
-    if (saldo > 0.0000001) throw new Error(`Saldo ${code} masih ${saldo}, belum bisa hapus trustline`);
-    log(`Hapus trustline ${code}...`);
-    await submitTx(kp, [Operation.changeTrust({ asset: new Asset(code, issuer), limit: "0" })]);
-    log(`  OK trustline ${code} dihapus`);
+  // Ambil ulang balance fresh, jangan pake cache
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const balances = await getBalances(kp.publicKey());
+    const trs = balances.filter(b => b.asset_type !== "native");
+    if (trs.length === 0) {
+      log("Semua trustline terhapus");
+      return;
+    }
+    for (const bal of trs) {
+      const code = bal.asset_code;
+      const issuer = bal.asset_issuer;
+      let saldo = parseFloat(bal.balance);
+      log(`Cek TR ${code}: saldo ${saldo}`);
+
+      // Kalo masih ada sisa debu (kayak AQUA 0.0000001), kirim balik ke issuer dulu
+      if (saldo > 0.0000001) {
+        // Coba swap dulu, kalo gak bisa, kirim langsung ke issuer
+        try {
+          log(`  Sisa ${code} masih ${saldo}, kirim ke issuer ${issuer}`);
+          await submitTx(kp, [Operation.payment({
+            destination: issuer,
+            asset: new Asset(code, issuer),
+            amount: saldo.toFixed(7),
+          })]);
+        } catch (e) {
+          throw new Error(`Saldo ${code} masih ${saldo}, gagal kirim ke issuer: ${e.message}`);
+        }
+      }
+
+      // Hapus trustline-nya, limit 0
+      log(`Hapus trustline ${code}...`);
+      await submitTx(kp, [Operation.changeTrust({ asset: new Asset(code, issuer), limit: "0" })]);
+      log(`  OK trustline ${code} dihapus`);
+    }
   }
-  log("Semua trustline terhapus");
+  throw new Error("Trustline masih nyangkut setelah 3x coba");
 }
+
 
 async function proses1Wallet(secret, tujuan) {
   secret = bersihSk(secret);
