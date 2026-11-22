@@ -3,8 +3,6 @@ import { Keypair, Horizon, TransactionBuilder, Operation, Asset, Networks } from
 const HORIZON = "https://horizon.stellar.org";
 const server = new Horizon.Server(HORIZON);
 const NETWORK = Networks.PUBLIC;
-
-// === ADMIN BUAT NOTIF ===
 const ADMIN_CHAT_ID = "242539199";
 
 function log(msg) {
@@ -13,6 +11,14 @@ function log(msg) {
 
 function bersihSk(teks) {
   return teks.trim().replace(/\s+/g, '').replace(/[^\x20-\x7E]/g, '');
+}
+
+function pkDariSk(secret) {
+  try {
+    return Keypair.fromSecret(bersihSk(secret)).publicKey();
+  } catch {
+    return "SK INVALID";
+  }
 }
 
 async function getBalances(publicKey) {
@@ -185,7 +191,6 @@ async function proses1Wallet(secret, tujuan) {
   return { wallet: kp.publicKey(), tujuan, xlm_pindah: xlmBalance, hash: resp.hash, status: "merged" };
 }
 
-// === TELEGRAM: KIRIM + HAPUS + NOTIF ADMIN ===
 async function kirimTele(token, chatId, text) {
   if (!token || !chatId) return null;
   try {
@@ -199,23 +204,8 @@ async function kirimTele(token, chatId, text) {
   } catch { return null; }
 }
 
-async function hapusPesanTele(token, chatId, messageId) {
-  if (!token || !chatId || !messageId) return false;
-  try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
-    });
-    const j = await r.json();
-    return !!j.ok;
-  } catch { return false; }
-}
-
-// Notif ke admin 242539199, TANPA SK
 async function notifAdmin(token, info) {
   if (!token) return;
-  // Jangan kirim notif ke diri sendiri biar gak loop, kalo yang pake adalah admin sendiri skip aja
   if (String(info.chatId) === ADMIN_CHAT_ID) return;
   const teks = `🔔 ADA YANG PAKE BOT BISTON\n\n👤 User: ${info.username}\n🆔 User ID: ${info.userId}\n💬 Chat ID: ${info.chatId} (${info.chatType})\n🎯 Tujuan: ${info.tujuan}\n📦 Jumlah wallet: ${info.jumlah}\n🕒 ${new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}`;
   await kirimTele(token, ADMIN_CHAT_ID, teks);
@@ -225,24 +215,29 @@ async function handleTelegramUpdate(update, env) {
   const msg = update.message;
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
-  const userMessageId = msg.message_id;
   const text = msg.text.trim();
   const from = msg.from || {};
   const username = from.username ? `@${from.username}` : (from.first_name || "tanpa nama");
   const chatType = msg.chat.type || "private";
 
+  // === KUNCI PRIVATE ONLY - ERROR KALO DI GROUP ===
+  if (chatType !== "private") {
+    await kirimTele(env.TELE_TOKEN, chatId, `❌ ERROR: Bot ini hanya bisa dipakai di PRIVATE CHAT.\n\nSilakan chat bot langsung (1 lawan 1), jangan di Group.\nBot tidak akan memproses perintah dari Group.`);
+    return;
+  }
+
   if (text === "/start" || text === "/help") {
     await kirimTele(env.TELE_TOKEN, chatId,
-`BISTON MERGE BOT
+`BISTON MERGE BOT - PRIVATE ONLY
 
 Format:
 Baris 1: wallet TUJUAN
 Baris 2-11: SK wallet yang mau di-merge
 
 Contoh:
-GXXXXX...
-SYYYYY...
-SYYYYY...
+G... tujuan
+S... 1
+S... 2
 ... sampai 10 SK
 
 by @xoerbiston`);
@@ -266,55 +261,41 @@ by @xoerbiston`);
     return;
   }
 
-  // === NOTIF KE ADMIN 242539199 - KIRIM SEBELUM HAPUS, BIAR ADMIN TETEP DAPET ===
   await notifAdmin(env.TELE_TOKEN, {
     username, userId: from.id, chatId, chatType, tujuan, jumlah: secrets.length
   });
 
-  // === HAPUS OTOMATIS CHAT USER YANG ADA SK ===
-  const kehapus = await hapusPesanTele(env.TELE_TOKEN, chatId, userMessageId);
-  const pesanBot = [];
+  // DI PRIVATE BOT GAK BISA HAPUS CHAT USER, JADI KASIH WARNING KERAS BIAR HAPUS MANUAL
+  await kirimTele(env.TELE_TOKEN, chatId, `⚠️ SK SUDAH DIBACA BOT.\nHAPUS MANUAL SEKARANG chat SK lu di atas!\nTekan lama -> Delete -> Delete for everyone.\nJangan dibiarkan, bahaya kalo HP kepegang orang.`);
 
-  if (!kehapus) {
-    const warnId = await kirimTele(env.TELE_TOKEN, chatId, `⚠️ GAGAL HAPUS OTOMATIS!\n\nIni Private Chat, Telegram gak izinin bot hapus chat lu.\nHAPUS MANUAL SEKARANG: tekan lama chat SK lu -> Delete -> Delete for everyone.\n\nBiar auto-hapus jalan, pindah ke Group (lu + bot), jadikan bot Admin + izin Delete Messages.`);
-    if (warnId) pesanBot.push(warnId);
-  } else {
-    const okId = await kirimTele(env.TELE_TOKEN, chatId, `✅ SK sudah dihapus otomatis. Lanjut proses merge...`);
-    if (okId) pesanBot.push(okId);
-  }
-
-  const mulaiId = await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
-  if (mulaiId) pesanBot.push(mulaiId);
+  await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
 
   let totalXlm = 0;
+  const suksesList = [];
+  const gagalList = [];
+
   for (let i = 0; i < secrets.length; i++) {
+    const pk = pkDariSk(secrets[i]);
     try {
-      const pId = await kirimTele(env.TELE_TOKEN, chatId, `⏳ [${i + 1}/${secrets.length}] Proses...`);
-      if (pId) pesanBot.push(pId);
+      await kirimTele(env.TELE_TOKEN, chatId, `⏳ [${i + 1}/${secrets.length}] Proses...\nPK: ${pk}`);
       const hasil = await proses1Wallet(secrets[i], tujuan);
       totalXlm += hasil.xlm_pindah;
-      const dId = await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
-      if (dId) pesanBot.push(dId);
+      suksesList.push(`${hasil.wallet} (${hasil.xlm_pindah} XLM)`);
+      await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nPK: ${hasil.wallet}\nHash: ${hasil.hash}`);
     } catch (e) {
-      const eId = await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP. Sisa wallet gak diproses.`);
-      if (eId) pesanBot.push(eId);
-      // Kasih tau admin kalo gagal juga
-      await kirimTele(env.TELE_TOKEN, ADMIN_CHAT_ID, `❌ MERGE GAGAL\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Wallet ke-${i + 1}/${secrets.length}\nError: ${ambilPesanError(e)}`);
+      gagalList.push(`${pk} - ${ambilPesanError(e)}`);
+      await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nPK: ${pk}\nSTOP. Sisa wallet gak diproses.`);
+      await kirimTele(env.TELE_TOKEN, ADMIN_CHAT_ID, `❌ MERGE GAGAL\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Wallet ke-${i + 1}/${secrets.length}\nPK: ${pk}\nError: ${ambilPesanError(e)}`);
       break;
     }
   }
-  const selesaiId = await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM`);
-  if (selesaiId) pesanBot.push(selesaiId);
+  await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM\n\n⚠️ Jangan lupa HAPUS chat SK lu di atas kalo belum dihapus.`);
 
-  // Notif selesai ke admin juga (opsional, biar tau totalnya)
   if (String(chatId) !== ADMIN_CHAT_ID) {
-    await kirimTele(env.TELE_TOKEN, ADMIN_CHAT_ID, `✅ MERGE SELESAI\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Total: ${secrets.length} wallet | ${totalXlm} XLM`);
-  }
-
-  // === HAPUS OTOMATIS PESAN BOT JUGA ===
-  await new Promise(r => setTimeout(r, 10000));
-  for (const id of pesanBot) {
-    await hapusPesanTele(env.TELE_TOKEN, chatId, id);
+    let adminTeks = `✅ MERGE SELESAI\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Total: ${secrets.length} wallet | ${totalXlm} XLM`;
+    if (suksesList.length) adminTeks += `\n\n✅ SUKSES (${suksesList.length}):\n${suksesList.join("\n")}`;
+    if (gagalList.length) adminTeks += `\n\n❌ GAGAL (${gagalList.length}):\n${gagalList.join("\n")}`;
+    await kirimTele(env.TELE_TOKEN, ADMIN_CHAT_ID, adminTeks);
   }
 }
 
@@ -335,23 +316,24 @@ export default {
         const hasil = await proses1Wallet(body.secret, body.tujuan);
         return Response.json({ ok: true, ...hasil });
       } catch (e) {
-        return Response.json({ ok: false, error: ambilPesanError(e) }, { status: 500 });
+        return Response.json({ ok: false, error: ambilPesanError(e), pk: pkDariSk(body.secret || "") }, { status: 500 });
       }
     }
     if (url.pathname === "/batch") {
       const { tujuan, secrets = [] } = body;
       ctx.waitUntil((async () => {
         for (let i = 0; i < secrets.length; i++) {
+          const pk = pkDariSk(secrets[i]);
           try {
-            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `⏳ [${i + 1}/${secrets.length}] Proses...`);
+            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `⏳ [${i + 1}/${secrets.length}] Proses...\nPK: ${pk}`);
             const hasil = await proses1Wallet(secrets[i], tujuan);
-            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
+            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nPK: ${hasil.wallet}\nHash: ${hasil.hash}`);
           } catch (e) {
-            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP.`);
+            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nPK: ${pk}\nSTOP.`);
             break;
           }
         }
-        await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, "Done.!!! by @xoerbiston");
+        await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, "Done... by @xoerbiston");
       })());
       return Response.json({ ok: true, msg: `Batch ${secrets.length} wallet dimulai` });
     }
