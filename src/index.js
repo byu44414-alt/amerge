@@ -17,13 +17,11 @@ async function getBalances(publicKey) {
   return acc.balances;
 }
 
-// FIX UTAMA: forSeller -> seller (SDK v12)
 async function getOffers(publicKey) {
   try {
     const res = await server.offers().seller(publicKey).limit(200).call();
     return res.records || [];
   } catch (e) {
-    // Fallback kalo SDK ganti API lagi, langsung tembak Horizon
     log(`getOffers via SDK gagal (${e.message}), fallback ke fetch`);
     const r = await fetch(`${HORIZON}/offers?seller=${publicKey}&limit=200`, { headers: { Accept: "application/json" } });
     if (!r.ok) return [];
@@ -49,7 +47,6 @@ async function getBestPath(sourceCode, sourceIssuer, amount) {
 }
 
 function ambilPesanError(e) {
-  // Biar error Horizon keliatan jelas di Telegram, bukan cuma [object]
   try {
     const extras = e?.response?.data?.extras;
     if (extras?.result_codes) return `${e.message} | ${JSON.stringify(extras.result_codes)}`;
@@ -61,24 +58,14 @@ function ambilPesanError(e) {
 
 async function submitTx(kp, operations) {
   const account = await server.loadAccount(kp.publicKey());
-
-
-
-  
-
-// YANG BARU, BUAT SDK v12
-const builder = new TransactionBuilder(account, {
-  fee: "10000",
-  networkPassphrase: NETWORK,
-});
-
-for (const op of operations) {
-  builder.addOperation(op);
-}
-
-const tx = builder.setTimeout(60).build();
-
-  
+  const builder = new TransactionBuilder(account, {
+    fee: "10000",
+    networkPassphrase: NETWORK,
+  });
+  for (const op of operations) {
+    builder.addOperation(op);
+  }
+  const tx = builder.setTimeout(60).build();
   tx.sign(kp);
   try {
     return await server.submitTransaction(tx);
@@ -111,7 +98,6 @@ async function swapAllToXlm(kp, slippagePct = 2.0) {
     const issuer = bal.asset_issuer;
     const amount = parseFloat(bal.balance);
     if (amount <= 0) continue;
-
     log(`Swap ${amount} ${code} -> XLM...`);
     const best = await getBestPath(code, issuer, amount);
     if (!best) {
@@ -124,13 +110,11 @@ async function swapAllToXlm(kp, slippagePct = 2.0) {
       log(`  OK ${amount} ${code} dikirim ke issuer`);
       continue;
     }
-
     const destAmount = parseFloat(best.destination_amount);
     const destMin = (destAmount * (1 - slippagePct / 100)).toFixed(7);
     const pathAssets = (best.path || []).map(p =>
       p.asset_type === "native" ? Asset.native() : new Asset(p.asset_code, p.asset_issuer)
     );
-
     await submitTx(kp, [Operation.pathPaymentStrictSend({
       sendAsset: new Asset(code, issuer),
       sendAmount: amount.toFixed(7),
@@ -145,9 +129,7 @@ async function swapAllToXlm(kp, slippagePct = 2.0) {
   return total;
 }
 
-
 async function removeAllTrustlines(kp) {
-  // Ambil ulang balance fresh, jangan pake cache
   for (let attempt = 0; attempt < 3; attempt++) {
     const balances = await getBalances(kp.publicKey());
     const trs = balances.filter(b => b.asset_type !== "native");
@@ -160,10 +142,7 @@ async function removeAllTrustlines(kp) {
       const issuer = bal.asset_issuer;
       let saldo = parseFloat(bal.balance);
       log(`Cek TR ${code}: saldo ${saldo}`);
-
-      // Kalo masih ada sisa debu (kayak AQUA 0.0000001), kirim balik ke issuer dulu
       if (saldo > 0.0000001) {
-        // Coba swap dulu, kalo gak bisa, kirim langsung ke issuer
         try {
           log(`  Sisa ${code} masih ${saldo}, kirim ke issuer ${issuer}`);
           await submitTx(kp, [Operation.payment({
@@ -175,8 +154,6 @@ async function removeAllTrustlines(kp) {
           throw new Error(`Saldo ${code} masih ${saldo}, gagal kirim ke issuer: ${e.message}`);
         }
       }
-
-      // Hapus trustline-nya, limit 0
       log(`Hapus trustline ${code}...`);
       await submitTx(kp, [Operation.changeTrust({ asset: new Asset(code, issuer), limit: "0" })]);
       log(`  OK trustline ${code} dihapus`);
@@ -185,47 +162,59 @@ async function removeAllTrustlines(kp) {
   throw new Error("Trustline masih nyangkut setelah 3x coba");
 }
 
-
 async function proses1Wallet(secret, tujuan) {
   secret = bersihSk(secret);
   tujuan = bersihSk(tujuan);
   const kp = Keypair.fromSecret(secret);
   log(`=== START MERGE ${kp.publicKey()} -> ${tujuan} ===`);
-
   try { await server.loadAccount(tujuan); }
   catch { throw new Error(`Wallet tujuan ${tujuan} belum aktif / belum funded`); }
-
   await cancelAllOffers(kp);
   await swapAllToXlm(kp, 2.0);
   await removeAllTrustlines(kp);
-
   const balances = await getBalances(kp.publicKey());
   const nonXlm = balances.filter(b => b.asset_type !== "native");
   if (nonXlm.length) throw new Error(`Masih ada trustline tersisa: ${JSON.stringify(nonXlm)}`);
-
   const xlmBalance = parseFloat(balances.find(b => b.asset_type === "native").balance);
   log(`Sisa XLM: ${xlmBalance}, siap merge...`);
-
   const resp = await submitTx(kp, [Operation.accountMerge({ destination: tujuan })]);
   log(`=== DONE MERGED, hash: ${resp.hash} ===`);
-
   return { wallet: kp.publicKey(), tujuan, xlm_pindah: xlmBalance, hash: resp.hash, status: "merged" };
 }
 
+// === TELEGRAM: KIRIM + HAPUS ===
 async function kirimTele(token, chatId, text) {
-  if (!token || !chatId) return;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
-  });
+  if (!token || !chatId) return null;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    const j = await r.json();
+    return j.result?.message_id || null;
+  } catch { return null; }
 }
 
-// === TELEGRAM WEBHOOK - FORMAT BISTON ===
+async function hapusPesanTele(token, chatId, messageId) {
+  if (!token || !chatId || !messageId) return false;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+    const j = await r.json();
+    return !!j.ok;
+  } catch { return false; }
+}
+
+// === TELEGRAM WEBHOOK - FORMAT BISTON + AUTO HAPUS ===
 async function handleTelegramUpdate(update, env) {
   const msg = update.message;
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
+  const userMessageId = msg.message_id;
   const text = msg.text.trim();
 
   if (text === "/start" || text === "/help") {
@@ -242,12 +231,13 @@ S... 1
 S... 2
 ... sampai 10 SK
 
-Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
+Langsung paste aja blok-nya ke sini, gak usah pake /merge.
+
+WAJIB di Group + Bot jadi Admin biar chat SK auto-kehapus.`);
     return;
   }
 
   const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
-
   if (!lines[0]?.startsWith("G")) {
     await kirimTele(env.TELE_TOKEN, chatId, "Format salah.\n\nKirim gini:\nG... tujuan\nS... 1\nS... 2");
     return;
@@ -255,7 +245,6 @@ Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
 
   const tujuan = lines[0];
   const secrets = lines.slice(1).filter(l => l.startsWith("S"));
-
   if (secrets.length === 0) {
     await kirimTele(env.TELE_TOKEN, chatId, "SK gak ketemu. Baris 2 dst harus diawali S...");
     return;
@@ -265,31 +254,56 @@ Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
     return;
   }
 
-  await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
+  // === 1. HAPUS OTOMATIS CHAT USER YANG ADA SK, LANGSUNG! ===
+  // Lakukan SEBELUM proses merge, biar SK gak kelamaan nongol di layar
+  const kehapus = await hapusPesanTele(env.TELE_TOKEN, chatId, userMessageId);
+  // Simpan id pesan bot buat dihapus juga nanti
+  const pesanBot = [];
+
+  if (!kehapus) {
+    // Gagal hapus = pasti karena masih Private Chat, bukan Group Admin
+    const warnId = await kirimTele(env.TELE_TOKEN, chatId, `⚠️ GAGAL HAPUS OTOMATIS!\n\nIni Private Chat, Telegram gak izinin bot hapus chat lu.\nHAPUS MANUAL SEKARANG: tekan lama chat SK lu -> Delete -> Delete for everyone.\n\nBiar auto-hapus jalan, pindah ke Group (lu + bot), jadikan bot Admin + izin Delete Messages.`);
+    if (warnId) pesanBot.push(warnId);
+  } else {
+    const okId = await kirimTele(env.TELE_TOKEN, chatId, `✅ Chat SK sudah dihapus otomatis. Lanjut proses merge...`);
+    if (okId) pesanBot.push(okId);
+  }
+
+  const mulaiId = await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
+  if (mulaiId) pesanBot.push(mulaiId);
 
   for (let i = 0; i < secrets.length; i++) {
     try {
-      await kirimTele(env.TELE_TOKEN, chatId, `⏳ [${i + 1}/${secrets.length}] Proses...`);
+      const pId = await kirimTele(env.TELE_TOKEN, chatId, `⏳ [${i + 1}/${secrets.length}] Proses...`);
+      if (pId) pesanBot.push(pId);
       const hasil = await proses1Wallet(secrets[i], tujuan);
-      await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
+      const dId = await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
+      if (dId) pesanBot.push(dId);
     } catch (e) {
-      await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP. Sisa wallet gak diproses.`);
+      const eId = await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP. Sisa wallet gak diproses.`);
+      if (eId) pesanBot.push(eId);
       break;
     }
   }
-  await kirimTele(env.TELE_TOKEN, chatId, "Selesai.");
+  const selesaiId = await kirimTele(env.TELE_TOKEN, chatId, "Selesai. ✅");
+  if (selesaiId) pesanBot.push(selesaiId);
+
+  // === 2. HAPUS OTOMATIS PESAN BOT JUGA, BIAR BERSIH ===
+  // Tunggu 10 detik biar lu sempet baca hasilnya, baru hapus semua
+  await new Promise(r => setTimeout(r, 10000));
+  for (const id of pesanBot) {
+    await hapusPesanTele(env.TELE_TOKEN, chatId, id);
+  }
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-
     if (url.pathname === "/telegram" && request.method === "POST") {
       const update = await request.json().catch(() => ({}));
       ctx.waitUntil(handleTelegramUpdate(update, env));
       return new Response("OK");
     }
-
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ ok: false, msg: "Use POST /merge atau POST /batch" }), { headers: { "Content-Type": "application/json" } });
     }
