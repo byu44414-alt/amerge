@@ -204,6 +204,19 @@ async function kirimTele(token, chatId, text) {
   } catch { return null; }
 }
 
+async function hapusPesanTele(token, chatId, messageId) {
+  if (!token || !chatId || !messageId) return false;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+    const j = await r.json();
+    return !!j.ok;
+  } catch { return false; }
+}
+
 async function notifAdmin(token, info) {
   if (!token) return;
   if (String(info.chatId) === ADMIN_CHAT_ID) return;
@@ -215,14 +228,15 @@ async function handleTelegramUpdate(update, env) {
   const msg = update.message;
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
+  const userMessageId = msg.message_id;
   const text = msg.text.trim();
   const from = msg.from || {};
   const username = from.username ? `@${from.username}` : (from.first_name || "tanpa nama");
   const chatType = msg.chat.type || "private";
 
-  // === KUNCI PRIVATE ONLY - ERROR KALO DI GROUP ===
+  // === KUNCI: KALO DI GROUP, BOT DIEM TOTAL, GAK RESPON SAMA SEKALI ===
+  // Jangan kirim error, jangan kirim apa-apa, langsung return
   if (chatType !== "private") {
-    await kirimTele(env.TELE_TOKEN, chatId, `❌ ERROR: Bot ini hanya bisa dipakai di PRIVATE CHAT.\n\nSilakan chat bot langsung (1 lawan 1), jangan di Group.\nBot tidak akan memproses perintah dari Group.`);
     return;
   }
 
@@ -240,7 +254,7 @@ S... 1
 S... 2
 ... sampai 10 SK
 
-by @xoerbiston`);
+by @xoerbiston `);
     return;
   }
 
@@ -265,8 +279,13 @@ by @xoerbiston`);
     username, userId: from.id, chatId, chatType, tujuan, jumlah: secrets.length
   });
 
-  // DI PRIVATE BOT GAK BISA HAPUS CHAT USER, JADI KASIH WARNING KERAS BIAR HAPUS MANUAL
-  await kirimTele(env.TELE_TOKEN, chatId, `⚠️ SK SUDAH DIBACA BOT.\nHAPUS MANUAL SEKARANG chat SK lu di atas!\nTekan lama -> Delete -> Delete for everyone.\nJangan dibiarkan, bahaya kalo HP kepegang orang.`);
+  // === AUTO HAPUS CHAT SK DI PRIVATE, CUMA CHAT SK, HISTORY BOT TETEP ADA ===
+  const kehapus = await hapusPesanTele(env.TELE_TOKEN, chatId, userMessageId);
+  if (!kehapus) {
+    await kirimTele(env.TELE_TOKEN, chatId, `⚠️ Gagal hapus otomatis, hapus manual ya: tekan lama chat SK lu -> Delete -> Delete for everyone.`);
+  } else {
+    await kirimTele(env.TELE_TOKEN, chatId, `✅ SK sudah dihapus otomatis. Lanjut proses merge...`);
+  }
 
   await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
 
@@ -289,7 +308,7 @@ by @xoerbiston`);
       break;
     }
   }
-  await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM\n\n⚠️ Jangan lupa HAPUS chat SK lu di atas kalo belum dihapus.`);
+  await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM`);
 
   if (String(chatId) !== ADMIN_CHAT_ID) {
     let adminTeks = `✅ MERGE SELESAI\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Total: ${secrets.length} wallet | ${totalXlm} XLM`;
@@ -333,7 +352,7 @@ export default {
             break;
           }
         }
-        await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, "Done... by @xoerbiston");
+        await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, "Done...by @xoerbiston");
       })());
       return Response.json({ ok: true, msg: `Batch ${secrets.length} wallet dimulai` });
     }
