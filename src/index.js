@@ -61,13 +61,24 @@ function ambilPesanError(e) {
 
 async function submitTx(kp, operations) {
   const account = await server.loadAccount(kp.publicKey());
-  const tx = new TransactionBuilder(account, {
-    fee: "10000",
-    networkPassphrase: NETWORK,
-  })
-    .addOperations(operations)
-    .setTimeout(60)
-    .build();
+
+
+
+  
+
+// YANG BARU, BUAT SDK v12
+const builder = new TransactionBuilder(account, {
+  fee: "10000",
+  networkPassphrase: NETWORK,
+});
+
+for (const op of operations) {
+  builder.addOperation(op);
+}
+
+const tx = builder.setTimeout(60).build();
+
+  
   tx.sign(kp);
   try {
     return await server.submitTransaction(tx);
