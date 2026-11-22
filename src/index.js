@@ -219,7 +219,7 @@ async function handleTelegramUpdate(update, env) {
 
   if (text === "/start" || text === "/help") {
     await kirimTele(env.TELE_TOKEN, chatId,
-`BISTON MERGE BOT -
+`BISTON MERGE BOT
 
 Format:
 Baris 1: wallet TUJUAN
@@ -230,10 +230,8 @@ G... tujuan
 S... 1
 S... 2
 ... sampai 10 SK
-
-Langsung paste aja blok-nya ke sini, gak usah pake /merge.
-
-WAJIB di Group + Bot jadi Admin biar chat SK auto-kehapus.`);
+by @xoerbiston
+`);
     return;
   }
 
@@ -265,7 +263,7 @@ WAJIB di Group + Bot jadi Admin biar chat SK auto-kehapus.`);
     const warnId = await kirimTele(env.TELE_TOKEN, chatId, `⚠️ GAGAL HAPUS OTOMATIS!\n\nIni Private Chat, Telegram gak izinin bot hapus chat lu.\nHAPUS MANUAL SEKARANG: tekan lama chat SK lu -> Delete -> Delete for everyone.\n\nBiar auto-hapus jalan, pindah ke Group (lu + bot), jadikan bot Admin + izin Delete Messages.`);
     if (warnId) pesanBot.push(warnId);
   } else {
-    const okId = await kirimTele(env.TELE_TOKEN, chatId, `✅ Chat SK sudah dihapus otomatis. Lanjut proses merge...`);
+    const okId = await kirimTele(env.TELE_TOKEN, chatId, `✅ Chat Delete. Lanjut proses merge...`);
     if (okId) pesanBot.push(okId);
   }
 
