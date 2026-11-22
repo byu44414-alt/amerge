@@ -308,7 +308,7 @@ by @xoerbiston `);
       break;
     }
   }
-  await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM`);
+  await kirimTele(env.TELE_TOKEN, chatId, `Selesai. ✅ Total pindah: ${totalXlm} XLM \n✅ by @xoerbiston`);
 
   if (String(chatId) !== ADMIN_CHAT_ID) {
     let adminTeks = `✅ MERGE SELESAI\n👤 ${username}\n🎯 Tujuan: ${tujuan}\n📦 Total: ${secrets.length} wallet | ${totalXlm} XLM`;
