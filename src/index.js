@@ -164,18 +164,57 @@ async function kirimTele(token, chatId, text) {
   });
 }
 
-// === WORKER ENTRY POINT ===
+// === TELEGRAM WEBHOOK ===
+async function handleTelegramUpdate(update, env) {
+  const msg = update.message;
+  if (!msg || !msg.text) return;
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  // /start
+  if (text === "/start") {
+    await kirimTele(env.TELE_TOKEN, chatId, "Bot Merge siap.\n\nCara pakai:\n/merge S... G...\n\nContoh:\n/merge SBXXX... GBXXX...");
+    return;
+  }
+
+  // /merge SECRET TUJUAN
+  if (text.startsWith("/merge")) {
+    const parts = text.split(/\s+/);
+    if (parts.length !== 3) {
+      await kirimTele(env.TELE_TOKEN, chatId, "Format salah.\nPakai: /merge S... G...");
+      return;
+    }
+    const secret = parts[1];
+    const tujuan = parts[2];
+    await kirimTele(env.TELE_TOKEN, chatId, "⏳ Proses merge...");
+    try {
+      const hasil = await proses1Wallet(secret, tujuan);
+      await kirimTele(env.TELE_TOKEN, chatId, `✅ DONE ${hasil.xlm_pindah} XLM pindah\nHash: ${hasil.hash}`);
+    } catch (e) {
+      await kirimTele(env.TELE_TOKEN, chatId, `❌ GAGAL: ${e.message}`);
+    }
+    return;
+  }
+
+  await kirimTele(env.TELE_TOKEN, chatId, "Perintah gak dikenal. Ketik /start");
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Endpoint baru buat Telegram
+    if (url.pathname === "/telegram" && request.method === "POST") {
+      const update = await request.json().catch(() => ({}));
+      ctx.waitUntil(handleTelegramUpdate(update, env));
+      return new Response("OK");
+    }
+
+    // Yang lama, biar curl masih jalan
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ ok: false, msg: "Use POST /merge atau POST /batch" }), { headers: { "Content-Type": "application/json" } });
     }
-
     const body = await request.json().catch(() => ({}));
-
-    // POST /merge { secret, tujuan }
     if (url.pathname === "/merge") {
       try {
         const hasil = await proses1Wallet(body.secret, body.tujuan);
@@ -184,18 +223,14 @@ export default {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
       }
     }
-
-    // POST /batch { tujuan, secrets: ["S...", "S..."] } -> ini pengganti kerja_merge_batch_tele
     if (url.pathname === "/batch") {
       const { tujuan, secrets = [] } = body;
-      // Jalankan di background biar gak timeout 30 detik Cloudflare
       ctx.waitUntil((async () => {
         for (let i = 0; i < secrets.length; i++) {
-          const s = secrets[i];
           try {
             await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `⏳ [${i + 1}/${secrets.length}] Proses...`);
-            const hasil = await proses1Wallet(s, tujuan);
-            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM pindah\nHash: ${hasil.hash}`);
+            const hasil = await proses1Wallet(secrets[i], tujuan);
+            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
           } catch (e) {
             await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `❌ [${i + 1}/${secrets.length}] GAGAL: ${e.message}\nSTOP.`);
             break;
@@ -203,9 +238,8 @@ export default {
         }
         await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, "Selesai.");
       })());
-      return Response.json({ ok: true, msg: `Batch ${secrets.length} wallet dimulai di background` });
+      return Response.json({ ok: true, msg: `Batch ${secrets.length} wallet dimulai` });
     }
-
     return new Response("Not Found", { status: 404 });
   },
 };
