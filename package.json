@@ -1,0 +1,6 @@
+{
+  "name": "amerge",
+  "dependencies": {
+    "@stellar/stellar-sdk": "12.3.0"
+  }
+}
