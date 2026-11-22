@@ -1,5 +1,4 @@
 import { Keypair, Horizon, TransactionBuilder, Operation, Asset, Networks } from '@stellar/stellar-sdk';
-//import { Keypair, Horizon, TransactionBuilder, Operation, Asset, Networks } from 'https://cdn.jsdelivr.net/npm/@stellar/stellar-sdk@12.3.0/+esm';
 
 const HORIZON = "https://horizon.stellar.org";
 const server = new Horizon.Server(HORIZON);
@@ -14,13 +13,23 @@ function bersihSk(teks) {
 }
 
 async function getBalances(publicKey) {
-  const acc = await server.accounts().accountId(publicKey).call();
+  const acc = await server.loadAccount(publicKey);
   return acc.balances;
 }
 
+// FIX UTAMA: forSeller -> seller (SDK v12)
 async function getOffers(publicKey) {
-  const res = await server.offers().forSeller(publicKey).limit(200).call();
-  return res.records;
+  try {
+    const res = await server.offers().seller(publicKey).limit(200).call();
+    return res.records || [];
+  } catch (e) {
+    // Fallback kalo SDK ganti API lagi, langsung tembak Horizon
+    log(`getOffers via SDK gagal (${e.message}), fallback ke fetch`);
+    const r = await fetch(`${HORIZON}/offers?seller=${publicKey}&limit=200`, { headers: { Accept: "application/json" } });
+    if (!r.ok) return [];
+    const j = await r.json();
+    return j._embedded?.records || [];
+  }
 }
 
 async function getBestPath(sourceCode, sourceIssuer, amount) {
@@ -39,6 +48,17 @@ async function getBestPath(sourceCode, sourceIssuer, amount) {
   return records.sort((a, b) => parseFloat(b.destination_amount) - parseFloat(a.destination_amount))[0];
 }
 
+function ambilPesanError(e) {
+  // Biar error Horizon keliatan jelas di Telegram, bukan cuma [object]
+  try {
+    const extras = e?.response?.data?.extras;
+    if (extras?.result_codes) return `${e.message} | ${JSON.stringify(extras.result_codes)}`;
+    if (extras) return `${e.message} | ${JSON.stringify(extras).slice(0, 300)}`;
+    if (e?.response?.data) return JSON.stringify(e.response.data).slice(0, 300);
+  } catch {}
+  return e.message || String(e);
+}
+
 async function submitTx(kp, operations) {
   const account = await server.loadAccount(kp.publicKey());
   const tx = new TransactionBuilder(account, {
@@ -53,7 +73,7 @@ async function submitTx(kp, operations) {
     return await server.submitTransaction(tx);
   } catch (e) {
     console.log("HORIZON ERROR:", e.response?.data?.extras || e.message);
-    throw e;
+    throw new Error(ambilPesanError(e));
   }
 }
 
@@ -164,14 +184,13 @@ async function kirimTele(token, chatId, text) {
   });
 }
 
-// === TELEGRAM WEBHOOK ===
+// === TELEGRAM WEBHOOK - FORMAT BISTON ===
 async function handleTelegramUpdate(update, env) {
   const msg = update.message;
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
   const text = msg.text.trim();
 
-  // /start - kasih contoh format lama
   if (text === "/start" || text === "/help") {
     await kirimTele(env.TELE_TOKEN, chatId,
 `BISTON MERGE BOT -
@@ -190,11 +209,8 @@ Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
     return;
   }
 
-  // Format lama: paste blok langsung
-  // Baris 1 = G..., Baris 2 dst = S...
   const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
 
-  // Kalo bukan format blok, tolak
   if (!lines[0]?.startsWith("G")) {
     await kirimTele(env.TELE_TOKEN, chatId, "Format salah.\n\nKirim gini:\nG... tujuan\nS... 1\nS... 2");
     return;
@@ -220,7 +236,7 @@ Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
       const hasil = await proses1Wallet(secrets[i], tujuan);
       await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
     } catch (e) {
-      await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${e.message}\nSTOP. Sisa wallet gak diproses.`);
+      await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP. Sisa wallet gak diproses.`);
       break;
     }
   }
@@ -231,14 +247,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Endpoint baru buat Telegram
     if (url.pathname === "/telegram" && request.method === "POST") {
       const update = await request.json().catch(() => ({}));
       ctx.waitUntil(handleTelegramUpdate(update, env));
       return new Response("OK");
     }
 
-    // Yang lama, biar curl masih jalan
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ ok: false, msg: "Use POST /merge atau POST /batch" }), { headers: { "Content-Type": "application/json" } });
     }
@@ -248,7 +262,7 @@ export default {
         const hasil = await proses1Wallet(body.secret, body.tujuan);
         return Response.json({ ok: true, ...hasil });
       } catch (e) {
-        return Response.json({ ok: false, error: e.message }, { status: 500 });
+        return Response.json({ ok: false, error: ambilPesanError(e) }, { status: 500 });
       }
     }
     if (url.pathname === "/batch") {
@@ -260,7 +274,7 @@ export default {
             const hasil = await proses1Wallet(secrets[i], tujuan);
             await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
           } catch (e) {
-            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `❌ [${i + 1}/${secrets.length}] GAGAL: ${e.message}\nSTOP.`);
+            await kirimTele(env.TELE_TOKEN, env.TELE_CHAT_ID, `❌ [${i + 1}/${secrets.length}] GAGAL: ${ambilPesanError(e)}\nSTOP.`);
             break;
           }
         }
