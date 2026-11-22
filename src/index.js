@@ -171,32 +171,60 @@ async function handleTelegramUpdate(update, env) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
 
-  // /start
-  if (text === "/start") {
-    await kirimTele(env.TELE_TOKEN, chatId, "Bot Merge siap.\n\nCara pakai:\n/merge S... G...\n\nContoh:\n/merge SBXXX... GBXXX...");
+  // /start - kasih contoh format lama
+  if (text === "/start" || text === "/help") {
+    await kirimTele(env.TELE_TOKEN, chatId,
+`BISTON MERGE BOT -
+
+Format:
+Baris 1: wallet TUJUAN
+Baris 2-11: SK wallet yang mau di-merge
+
+Contoh:
+G... tujuan
+S... 1
+S... 2
+... sampai 10 SK
+
+Langsung paste aja blok-nya ke sini, gak usah pake /merge.`);
     return;
   }
 
-  // /merge SECRET TUJUAN
-  if (text.startsWith("/merge")) {
-    const parts = text.split(/\s+/);
-    if (parts.length !== 3) {
-      await kirimTele(env.TELE_TOKEN, chatId, "Format salah.\nPakai: /merge S... G...");
-      return;
-    }
-    const secret = parts[1];
-    const tujuan = parts[2];
-    await kirimTele(env.TELE_TOKEN, chatId, "⏳ Proses merge...");
+  // Format lama: paste blok langsung
+  // Baris 1 = G..., Baris 2 dst = S...
+  const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
+
+  // Kalo bukan format blok, tolak
+  if (!lines[0]?.startsWith("G")) {
+    await kirimTele(env.TELE_TOKEN, chatId, "Format salah.\n\nKirim gini:\nG... tujuan\nS... 1\nS... 2");
+    return;
+  }
+
+  const tujuan = lines[0];
+  const secrets = lines.slice(1).filter(l => l.startsWith("S"));
+
+  if (secrets.length === 0) {
+    await kirimTele(env.TELE_TOKEN, chatId, "SK gak ketemu. Baris 2 dst harus diawali S...");
+    return;
+  }
+  if (secrets.length > 10) {
+    await kirimTele(env.TELE_TOKEN, chatId, "Maksimal 10 SK sekali kirim. Lu kirim " + secrets.length);
+    return;
+  }
+
+  await kirimTele(env.TELE_TOKEN, chatId, `⏳ BISTON MERGE dimulai\nTujuan: ${tujuan}\nTotal: ${secrets.length} wallet`);
+
+  for (let i = 0; i < secrets.length; i++) {
     try {
-      const hasil = await proses1Wallet(secret, tujuan);
-      await kirimTele(env.TELE_TOKEN, chatId, `✅ DONE ${hasil.xlm_pindah} XLM pindah\nHash: ${hasil.hash}`);
+      await kirimTele(env.TELE_TOKEN, chatId, `⏳ [${i + 1}/${secrets.length}] Proses...`);
+      const hasil = await proses1Wallet(secrets[i], tujuan);
+      await kirimTele(env.TELE_TOKEN, chatId, `✅ [${i + 1}/${secrets.length}] DONE ${hasil.xlm_pindah} XLM\nHash: ${hasil.hash}`);
     } catch (e) {
-      await kirimTele(env.TELE_TOKEN, chatId, `❌ GAGAL: ${e.message}`);
+      await kirimTele(env.TELE_TOKEN, chatId, `❌ [${i + 1}/${secrets.length}] GAGAL: ${e.message}\nSTOP. Sisa wallet gak diproses.`);
+      break;
     }
-    return;
   }
-
-  await kirimTele(env.TELE_TOKEN, chatId, "Perintah gak dikenal. Ketik /start");
+  await kirimTele(env.TELE_TOKEN, chatId, "Selesai.");
 }
 
 export default {
